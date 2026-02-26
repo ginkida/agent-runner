@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -103,6 +104,31 @@ var blockedNetworkPattern = regexp.MustCompile(
 	`(?i)\b(` + strings.Join(blockedNetworkCmds, "|") + `)\b`,
 )
 
+var blockedInterpreterCmds = []string{
+	"python", "python2", "python3", "node", "ruby", "perl", "php",
+}
+
+// blockedInterpreterPattern blocks general-purpose interpreters frequently used
+// to bypass shell deny-lists or open raw sockets.
+var blockedInterpreterPattern = regexp.MustCompile(
+	`(?i)\b(` + strings.Join(blockedInterpreterCmds, "|") + `)\b`,
+)
+
+// blockedNestedShellPattern blocks nested shell execution with inline scripts.
+var blockedNestedShellPattern = regexp.MustCompile(`(?i)\b(bash|sh|zsh|dash)\s+-c\b`)
+
+// blockedIndirectionPattern detects attempts to construct commands dynamically
+// via variable expansion, xargs, printf-to-exec, or hex/octal escapes.
+var blockedIndirectionPattern = regexp.MustCompile(
+	`(?i)` +
+		`\$\{?[a-zA-Z_][a-zA-Z0-9_]*\}?\s` + // $VAR or ${VAR} followed by space (likely execution)
+		`|\bxargs\b` + // xargs can execute arbitrary commands
+		`|\bprintf\b.*\|\s*` + // printf piped to something
+		`|\\x[0-9a-fA-F]{2}` + // hex escapes (\x63\x75\x72\x6c = curl)
+		`|\$'\\x` + // $'\x63' ANSI-C quoting
+		`|\\[0-7]{3}`, // octal escapes
+)
+
 // sensitivePaths that should never be read or written by the agent.
 var sensitivePaths = []string{
 	"/.ssh/",
@@ -125,14 +151,47 @@ func isDangerousCommand(cmd string) (bool, string) {
 	if loc := blockedNetworkPattern.FindStringIndex(cmd); loc != nil {
 		return true, fmt.Sprintf("blocked network command: %s", cmd[loc[0]:loc[1]])
 	}
+	if loc := blockedInterpreterPattern.FindStringIndex(cmd); loc != nil {
+		return true, fmt.Sprintf("blocked interpreter command: %s", cmd[loc[0]:loc[1]])
+	}
+	if loc := blockedNestedShellPattern.FindStringIndex(cmd); loc != nil {
+		return true, fmt.Sprintf("blocked nested shell execution: %s", cmd[loc[0]:loc[1]])
+	}
+	if loc := blockedIndirectionPattern.FindStringIndex(cmd); loc != nil {
+		return true, fmt.Sprintf("blocked command indirection: %s", cmd[loc[0]:loc[1]])
+	}
 
-	// Check for sensitive paths in the command
+	// Check for sensitive paths in the command.
+	// Normalize path-like tokens to defeat /etc/./shadow and /etc/../etc/shadow bypasses.
+	if blocked, reason := checkSensitivePaths(cmd); blocked {
+		return true, reason
+	}
+
+	return false, ""
+}
+
+// pathLikeToken matches anything that looks like a filesystem path.
+var pathLikeToken = regexp.MustCompile(`(?:/[^\s;|&<>"'` + "`" + `]+)+`)
+
+// checkSensitivePaths extracts path-like tokens from the command, cleans each
+// one (resolving . and .. segments), and checks against the sensitive paths
+// blocklist. This prevents bypasses like /etc/./shadow or /etc/../etc/shadow.
+func checkSensitivePaths(cmd string) (bool, string) {
+	// First check the raw command (catches literal matches).
 	for _, sp := range sensitivePaths {
 		if strings.Contains(cmd, sp) {
 			return true, fmt.Sprintf("blocked access to sensitive path: %s", sp)
 		}
 	}
-
+	// Then check normalized versions of every path-like token.
+	for _, token := range pathLikeToken.FindAllString(cmd, -1) {
+		cleaned := filepath.Clean(token)
+		for _, sp := range sensitivePaths {
+			if strings.Contains(cleaned, sp) {
+				return true, fmt.Sprintf("blocked access to sensitive path: %s", sp)
+			}
+		}
+	}
 	return false, ""
 }
 
@@ -165,6 +224,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 const maxOutputBytes = 100 * 1024 // 100KB cap for bash output
+const maxCommandBytes = 4096
 
 // BuiltinNames returns all available builtin tool names.
 func BuiltinNames() []string {
@@ -179,8 +239,10 @@ func BuiltinNames() []string {
 
 type readFileTool struct{ workDir string }
 
-func (t *readFileTool) Name() string        { return "read_file" }
-func (t *readFileTool) Description() string { return "Read the contents of a file. Returns numbered lines." }
+func (t *readFileTool) Name() string { return "read_file" }
+func (t *readFileTool) Description() string {
+	return "Read the contents of a file. Returns numbered lines."
+}
 func (t *readFileTool) Declaration() *agent.FunctionDeclaration {
 	return &agent.FunctionDeclaration{
 		Name:        t.Name(),
@@ -215,37 +277,54 @@ func (t *readFileTool) Execute(_ context.Context, args map[string]any) (*agent.T
 	if info.Size() > maxReadSize {
 		return agent.NewErrorResult(fmt.Sprintf("file too large: %s (%d bytes, max %d)", path, info.Size(), maxReadSize)), nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return agent.NewErrorResult(err.Error()), nil
-	}
-	lines := strings.Split(string(data), "\n")
+
 	offset := agent.GetIntDefault(args, "offset", 1)
 	limit := agent.GetIntDefault(args, "limit", 0)
 	if offset < 1 {
 		offset = 1
 	}
-	start := offset - 1
-	if start > len(lines) {
-		start = len(lines)
+
+	// Stream-read only the needed lines to avoid loading entire file into memory.
+	f, err := os.Open(path)
+	if err != nil {
+		return agent.NewErrorResult(err.Error()), nil
 	}
-	end := len(lines)
-	if limit > 0 && start+limit < end {
-		end = start + limit
-	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line
 	var buf strings.Builder
-	for i := start; i < end; i++ {
-		fmt.Fprintf(&buf, "%6d\t%s\n", i+1, lines[i])
+	lineNum := 0
+	collected := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum < offset {
+			continue
+		}
+		fmt.Fprintf(&buf, "%6d\t%s\n", lineNum, scanner.Text())
+		collected++
+		if limit > 0 && collected >= limit {
+			break
+		}
 	}
-	return agent.NewSuccessResult(buf.String()), nil
+	if err := scanner.Err(); err != nil {
+		return agent.NewErrorResult(fmt.Sprintf("read error: %v", err)), nil
+	}
+	result := buf.String()
+	if result == "" {
+		result = "(empty file or offset beyond end)"
+	}
+	return agent.NewSuccessResult(result), nil
 }
 
 // --- write_file ---
 
 type writeFileTool struct{ workDir string }
 
-func (t *writeFileTool) Name() string        { return "write_file" }
-func (t *writeFileTool) Description() string { return "Write content to a file, creating directories as needed." }
+func (t *writeFileTool) Name() string { return "write_file" }
+func (t *writeFileTool) Description() string {
+	return "Write content to a file, creating directories as needed."
+}
 func (t *writeFileTool) Declaration() *agent.FunctionDeclaration {
 	return &agent.FunctionDeclaration{
 		Name:        t.Name(),
@@ -261,11 +340,16 @@ func (t *writeFileTool) Declaration() *agent.FunctionDeclaration {
 	}
 }
 
+const maxWriteBytes = 10 << 20 // 10MB — matches read_file limit
+
 func (t *writeFileTool) Execute(_ context.Context, args map[string]any) (*agent.ToolResult, error) {
 	path, _ := agent.GetString(args, "file_path")
 	content, _ := agent.GetString(args, "content")
 	if path == "" {
 		return agent.NewErrorResult("file_path is required"), nil
+	}
+	if len(content) > maxWriteBytes {
+		return agent.NewErrorResult(fmt.Sprintf("content too large: %d bytes (max %d)", len(content), maxWriteBytes)), nil
 	}
 	safePath, err := sandboxPath(t.workDir, path)
 	if err != nil {
@@ -375,10 +459,19 @@ func (t *bashTool) Execute(ctx context.Context, args map[string]any) (*agent.Too
 	if command == "" {
 		return agent.NewErrorResult("command is required"), nil
 	}
+	if len(command) > maxCommandBytes {
+		return agent.NewErrorResult(fmt.Sprintf("command too long (max %d bytes)", maxCommandBytes)), nil
+	}
 	if dangerous, reason := isDangerousCommand(command); dangerous {
 		return agent.NewErrorResult(reason), nil
 	}
 	timeout := agent.GetIntDefault(args, "timeout", 120)
+	if timeout < 1 {
+		timeout = 1
+	}
+	if timeout > 300 {
+		timeout = 300
+	}
 
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
@@ -387,7 +480,11 @@ func (t *bashTool) Execute(ctx context.Context, args map[string]any) (*agent.Too
 	wrappedCmd := wrapWithLimits(command)
 
 	cmd := exec.CommandContext(execCtx, "bash", "-c", wrappedCmd)
-	cmd.Dir = t.workDir
+	safeWorkDir, err := sandboxPath(t.workDir, ".")
+	if err != nil {
+		return agent.NewErrorResult(err.Error()), nil
+	}
+	cmd.Dir = safeWorkDir
 
 	// Build isolated environment
 	sessionTmpDir, err := t.sessionTmpDir()
@@ -396,10 +493,21 @@ func (t *bashTool) Execute(ctx context.Context, args map[string]any) (*agent.Too
 	}
 	cmd.Env = []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"HOME=" + os.Getenv("HOME"),
-		"LANG=" + os.Getenv("LANG"),
+		"HOME=" + sessionTmpDir,
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
 		"TERM=dumb",
 		"TMPDIR=" + sessionTmpDir,
+		"TMP=" + sessionTmpDir,
+		"TEMP=" + sessionTmpDir,
+		"http_proxy=",
+		"https_proxy=",
+		"HTTP_PROXY=",
+		"HTTPS_PROXY=",
+		"ALL_PROXY=",
+		"NO_PROXY=*",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
 	}
 
 	stdoutBuf := &bytes.Buffer{}
@@ -489,7 +597,7 @@ func (t *globTool) Declaration() *agent.FunctionDeclaration {
 	}
 }
 
-func (t *globTool) Execute(_ context.Context, args map[string]any) (*agent.ToolResult, error) {
+func (t *globTool) Execute(ctx context.Context, args map[string]any) (*agent.ToolResult, error) {
 	pattern, _ := agent.GetString(args, "pattern")
 	if pattern == "" {
 		return agent.NewErrorResult("pattern is required"), nil
@@ -511,6 +619,9 @@ func (t *globTool) Execute(_ context.Context, args map[string]any) (*agent.ToolR
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+		if ctx.Err() != nil {
+			return filepath.SkipAll
 		}
 		if len(matches) >= maxMatches {
 			return filepath.SkipAll
@@ -541,6 +652,10 @@ func (t *globTool) Execute(_ context.Context, args map[string]any) (*agent.ToolR
 }
 
 // matchGlob supports ** doublestar patterns by splitting on ** segments.
+// maxDoublestarSegments caps the number of ** segments in a glob pattern
+// to prevent exponential backtracking in matchDoublestar.
+const maxDoublestarSegments = 3
+
 func matchGlob(pattern, name string) bool {
 	// Normalize separators
 	pattern = filepath.ToSlash(pattern)
@@ -551,6 +666,11 @@ func matchGlob(pattern, name string) bool {
 		// No **, use standard match
 		ok, _ := filepath.Match(pattern, name)
 		return ok
+	}
+
+	// Reject patterns with too many ** segments to prevent CPU exhaustion.
+	if len(parts)-1 > maxDoublestarSegments {
+		return false
 	}
 
 	// Match ** as "any path segment(s)"
@@ -663,6 +783,9 @@ func (t *grepTool) Execute(ctx context.Context, args map[string]any) (*agent.Too
 	err = filepath.WalkDir(searchPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+		if ctx.Err() != nil {
+			return filepath.SkipAll
 		}
 		if d.IsDir() {
 			if skipDirs[d.Name()] {

@@ -202,13 +202,16 @@ func (c *Client) doRequest(ctx context.Context, body map[string]any) (*agent.Str
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			chunks <- agent.ResponseChunk{Error: fmt.Errorf("stream read: %w", err)}
+			select {
+			case chunks <- agent.ResponseChunk{Error: fmt.Errorf("stream read: %w", err)}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		// Fallback done chunk if stream closed without message_stop
 		select {
 		case chunks <- agent.ResponseChunk{Done: true, FinishReason: agent.FinishReasonStop}:
-		default:
+		case <-ctx.Done():
 		}
 	}()
 
@@ -380,7 +383,7 @@ func convertToolsAnthropic(tools []*agent.FunctionDeclaration) []map[string]any 
 
 func schemaToJSON(s *agent.Schema) map[string]any {
 	if s == nil {
-		return nil
+		return map[string]any{"type": "object"}
 	}
 	m := map[string]any{}
 	if s.Type != "" {

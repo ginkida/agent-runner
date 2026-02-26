@@ -104,9 +104,14 @@ func (c *Client) SendMessageWithHistory(ctx context.Context, history []*agent.Co
 		"stream":   true,
 	}
 	if c.maxTokens > 0 {
-		body["max_tokens"] = c.maxTokens
+		if isReasoningModel(c.model) {
+			body["max_completion_tokens"] = c.maxTokens
+		} else {
+			body["max_tokens"] = c.maxTokens
+		}
 	}
-	if c.temperature != nil {
+	// Reasoning models (o1, o3) do not support temperature.
+	if c.temperature != nil && !isReasoningModel(c.model) {
 		body["temperature"] = *c.temperature
 	}
 	c.mu.RLock()
@@ -130,9 +135,14 @@ func (c *Client) SendFunctionResponse(ctx context.Context, history []*agent.Cont
 		"stream":   true,
 	}
 	if c.maxTokens > 0 {
-		body["max_tokens"] = c.maxTokens
+		if isReasoningModel(c.model) {
+			body["max_completion_tokens"] = c.maxTokens
+		} else {
+			body["max_tokens"] = c.maxTokens
+		}
 	}
-	if c.temperature != nil {
+	// Reasoning models (o1, o3) do not support temperature.
+	if c.temperature != nil && !isReasoningModel(c.model) {
 		body["temperature"] = *c.temperature
 	}
 	c.mu.RLock()
@@ -157,6 +167,13 @@ func (c *Client) SetSystemInstruction(instruction string) {
 }
 
 func (c *Client) GetModel() string { return c.model }
+// isReasoningModel returns true for OpenAI reasoning models (o1, o3 families)
+// which use max_completion_tokens instead of max_tokens and don't support temperature.
+func isReasoningModel(model string) bool {
+	return model == "o1" || model == "o3" ||
+		strings.HasPrefix(model, "o1-") || strings.HasPrefix(model, "o3-")
+}
+
 func (c *Client) Close() error     { return nil }
 
 // --- streaming ---

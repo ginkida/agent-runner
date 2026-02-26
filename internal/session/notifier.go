@@ -26,7 +26,7 @@ type StatusNotifier struct {
 	hmacSecret string
 	httpClient *http.Client
 	sem        chan struct{} // bounds concurrent notification goroutines
-	dropped    atomic.Uint64
+	dropped    *atomic.Uint64
 }
 
 // StatusPayload is the JSON body sent to Laravel on status transitions.
@@ -51,6 +51,7 @@ func NewStatusNotifier(baseURL, hmacSecret string, timeoutSec int) *StatusNotifi
 		hmacSecret: hmacSecret,
 		httpClient: &http.Client{Timeout: timeout, Transport: netutil.SafeTransport()},
 		sem:        make(chan struct{}, 32), // max 32 concurrent notifications
+		dropped:    &atomic.Uint64{},
 	}
 }
 
@@ -95,6 +96,7 @@ func (n *StatusNotifier) NotifyWithURL(ctx context.Context, overrideURL string, 
 		hmacSecret: n.hmacSecret,
 		httpClient: n.httpClient,
 		sem:        n.sem,
+		dropped:    n.dropped,
 	}
 	override.Notify(ctx, p)
 }
@@ -126,9 +128,10 @@ func (n *StatusNotifier) doNotify(ctx context.Context, p StatusPayload) error {
 		req.Header.Set("X-Session-ID", p.SessionID)
 
 		if n.hmacSecret != "" {
-			sig, ts := auth.SignRequest(n.hmacSecret, body)
+			sig, ts, nonce := auth.SignRequest(n.hmacSecret, body)
 			req.Header.Set("X-Signature", sig)
 			req.Header.Set("X-Timestamp", ts)
+			req.Header.Set("X-Nonce", nonce)
 		}
 
 		resp, err := n.httpClient.Do(req)

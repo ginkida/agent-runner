@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/ginkida/agent-runner/internal/config"
 	"github.com/ginkida/agent-runner/internal/middleware"
@@ -25,8 +26,12 @@ func New(cfg *config.Config, sessions *session.Manager, notifier *session.Status
 	router := NewRouter(cfg, sessions, rl, notifier)
 
 	srv := &http.Server{
-		Addr:    cfg.Addr(),
-		Handler: router,
+		Addr:              cfg.Addr(),
+		Handler:           router,
+		ReadHeaderTimeout: time.Duration(cfg.Server.ReadHeaderTimeoutSec) * time.Second,
+		ReadTimeout:       time.Duration(cfg.Server.ReadTimeoutSec) * time.Second,
+		WriteTimeout:      time.Duration(cfg.Server.WriteTimeoutSec) * time.Second,
+		IdleTimeout:       time.Duration(cfg.Server.IdleTimeoutSec) * time.Second,
 	}
 
 	if cfg.Server.TLS.Enabled() {

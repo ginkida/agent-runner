@@ -33,5 +33,5 @@ func (h *StreamHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess.Touch()
-	sse.Stream(w, r, sess.Events)
+	sse.Stream(w, r, sess.Events, sess.EventsDone())
 }

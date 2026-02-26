@@ -131,12 +131,12 @@ func (s *Session) SetError(err error) {
 	s.CompletedAt = now
 }
 
-// TryStart atomically transitions the session from a non-running state to running.
-// Returns false if the session is already running (prevents double-start TOCTOU).
+// TryStart atomically transitions the session from created to running.
+// Returns false if the session is not in the created state (already running or terminal).
 func (s *Session) TryStart() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.Status == StatusRunning {
+	if s.Status != StatusCreated {
 		return false
 	}
 	s.Status = StatusRunning
@@ -180,6 +180,11 @@ func (s *Session) CloseEvents() {
 			}
 		}
 	})
+}
+
+// EventsDone returns a channel closed when the session event stream is finalized.
+func (s *Session) EventsDone() <-chan struct{} {
+	return s.eventsDone
 }
 
 // SetCancel atomically sets the cancel function.

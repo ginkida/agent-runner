@@ -17,6 +17,37 @@ func (e *ErrSessionExists) Error() string {
 	return fmt.Sprintf("session %q already exists", e.ID)
 }
 
+// ErrSessionNotFound is returned when a session does not exist (or is not owned by caller).
+type ErrSessionNotFound struct{ ID string }
+
+func (e *ErrSessionNotFound) Error() string {
+	return fmt.Sprintf("session %q not found", e.ID)
+}
+
+// ErrSessionRunning is returned when trying to start an already running session.
+type ErrSessionRunning struct{ ID string }
+
+func (e *ErrSessionRunning) Error() string {
+	return fmt.Sprintf("session %q already running", e.ID)
+}
+
+// ErrSessionNotStartable is returned when trying to start a session that is not in the created state.
+type ErrSessionNotStartable struct {
+	ID     string
+	Status string
+}
+
+func (e *ErrSessionNotStartable) Error() string {
+	return fmt.Sprintf("session %q cannot be started (status: %s)", e.ID, e.Status)
+}
+
+// ErrMaxConcurrentReached is returned when max running sessions limit is reached.
+type ErrMaxConcurrentReached struct{ Limit int }
+
+func (e *ErrMaxConcurrentReached) Error() string {
+	return fmt.Sprintf("max concurrent sessions (%d) reached", e.Limit)
+}
+
 // Manager is an in-memory session store with TTL-based cleanup.
 type Manager struct {
 	sessions      map[string]*Session
@@ -45,17 +76,6 @@ func (m *Manager) Create(clientID, requestedID string, def AgentDefinition, opts
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check concurrent limit
-	running := 0
-	for _, s := range m.sessions {
-		if s.GetStatus() == StatusRunning {
-			running++
-		}
-	}
-	if m.maxConcurrent > 0 && running >= m.maxConcurrent {
-		return nil, fmt.Errorf("max concurrent sessions (%d) reached", m.maxConcurrent)
-	}
-
 	// Resolve session ID
 	id := requestedID
 	if id == "" {
@@ -67,6 +87,37 @@ func (m *Manager) Create(clientID, requestedID string, def AgentDefinition, opts
 	sess := NewSession(id, clientID, def, opts)
 	m.sessions[id] = sess
 	return sess, nil
+}
+
+// StartOwned atomically transitions a session to running while enforcing maxConcurrent.
+// cancelFn is stored only when the transition succeeds.
+func (m *Manager) StartOwned(id, clientID string, cancelFn func()) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, ok := m.sessions[id]
+	if !ok || sess.ClientID != clientID {
+		return &ErrSessionNotFound{ID: id}
+	}
+
+	status := sess.GetStatus()
+	if status == StatusRunning {
+		return &ErrSessionRunning{ID: id}
+	}
+	if status != StatusCreated {
+		return &ErrSessionNotStartable{ID: id, Status: string(status)}
+	}
+
+	if m.maxConcurrent > 0 && m.runningCountLocked() >= m.maxConcurrent {
+		return &ErrMaxConcurrentReached{Limit: m.maxConcurrent}
+	}
+
+	if !sess.TryStart() {
+		return &ErrSessionRunning{ID: id}
+	}
+	sess.SetCancel(cancelFn)
+
+	return nil
 }
 
 // Get retrieves a session by ID.
@@ -99,6 +150,7 @@ func (m *Manager) DeleteOwned(id, clientID string) bool {
 	}
 
 	sess.CancelIfRunning()
+	sess.CloseEvents()
 	sess.SetStatus(StatusCancelled)
 	delete(m.sessions, id)
 	return true
@@ -115,6 +167,7 @@ func (m *Manager) Delete(id string) bool {
 	}
 
 	sess.CancelIfRunning()
+	sess.CloseEvents()
 	sess.SetStatus(StatusCancelled)
 	delete(m.sessions, id)
 	return true
@@ -131,13 +184,7 @@ func (m *Manager) Count() int {
 func (m *Manager) ActiveCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	count := 0
-	for _, s := range m.sessions {
-		if s.GetStatus() == StatusRunning {
-			count++
-		}
-	}
-	return count
+	return m.runningCountLocked()
 }
 
 // Drain cancels all running agents and waits for them to finish.
@@ -210,12 +257,14 @@ func (m *Manager) reapExpired() {
 		// Reap terminal sessions that have exceeded TTL since completion.
 		isTerminal := status == StatusCompleted || status == StatusFailed || status == StatusCancelled
 		if isTerminal && !completedAt.IsZero() && now.Sub(completedAt) > m.ttl {
+			sess.CloseEvents()
 			delete(m.sessions, id)
 			continue
 		}
 
 		// Reap created-but-never-started sessions older than TTL to prevent memory leaks.
 		if status == StatusCreated && now.Sub(createdAt) > m.ttl {
+			sess.CloseEvents()
 			delete(m.sessions, id)
 		}
 	}
@@ -225,4 +274,14 @@ func generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func (m *Manager) runningCountLocked() int {
+	count := 0
+	for _, s := range m.sessions {
+		if s.GetStatus() == StatusRunning {
+			count++
+		}
+	}
+	return count
 }

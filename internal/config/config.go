@@ -27,10 +27,14 @@ type CircuitBreakerConfig struct {
 }
 
 type ServerConfig struct {
-	Host         string    `yaml:"host"`
-	Port         int       `yaml:"port"`
-	MaxBodyBytes int64     `yaml:"max_body_bytes"`
-	TLS          TLSConfig `yaml:"tls"`
+	Host                 string    `yaml:"host"`
+	Port                 int       `yaml:"port"`
+	MaxBodyBytes         int64     `yaml:"max_body_bytes"`
+	ReadHeaderTimeoutSec int       `yaml:"read_header_timeout_sec"`
+	ReadTimeoutSec       int       `yaml:"read_timeout_sec"`
+	WriteTimeoutSec      int       `yaml:"write_timeout_sec"`
+	IdleTimeoutSec       int       `yaml:"idle_timeout_sec"`
+	TLS                  TLSConfig `yaml:"tls"`
 }
 
 // TLSConfig holds TLS certificate paths. Both fields must be set to enable TLS.
@@ -79,9 +83,13 @@ type RateLimitConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
-			Port:         8090,
-			MaxBodyBytes: 10 * 1024 * 1024, // 10MB
+			Host:                 "0.0.0.0",
+			Port:                 8090,
+			MaxBodyBytes:         10 * 1024 * 1024, // 10MB
+			ReadHeaderTimeoutSec: 5,
+			ReadTimeoutSec:       30,
+			WriteTimeoutSec:      65,
+			IdleTimeoutSec:       120,
 		},
 		Defaults: DefaultsConfig{
 			Model:       "gpt-4o-mini",
@@ -158,6 +166,26 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AGENT_RUNNER_SERVER_MAX_BODY_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.Server.MaxBodyBytes = n
+		}
+	}
+	if v := os.Getenv("AGENT_RUNNER_SERVER_READ_HEADER_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Server.ReadHeaderTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("AGENT_RUNNER_SERVER_READ_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Server.ReadTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("AGENT_RUNNER_SERVER_WRITE_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Server.WriteTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("AGENT_RUNNER_SERVER_IDLE_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Server.IdleTimeoutSec = n
 		}
 	}
 	if v := os.Getenv("AGENT_RUNNER_TLS_CERT_FILE"); v != "" {
@@ -287,6 +315,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Callback.TimeoutSec < 0 {
 		return fmt.Errorf("callback.timeout_sec must not be negative, got %d", c.Callback.TimeoutSec)
+	}
+	if c.Server.ReadHeaderTimeoutSec < 0 {
+		return fmt.Errorf("server.read_header_timeout_sec must not be negative, got %d", c.Server.ReadHeaderTimeoutSec)
+	}
+	if c.Server.ReadTimeoutSec < 0 {
+		return fmt.Errorf("server.read_timeout_sec must not be negative, got %d", c.Server.ReadTimeoutSec)
+	}
+	if c.Server.WriteTimeoutSec < 0 {
+		return fmt.Errorf("server.write_timeout_sec must not be negative, got %d", c.Server.WriteTimeoutSec)
+	}
+	if c.Server.IdleTimeoutSec < 0 {
+		return fmt.Errorf("server.idle_timeout_sec must not be negative, got %d", c.Server.IdleTimeoutSec)
 	}
 
 	// Session limits

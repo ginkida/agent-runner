@@ -90,6 +90,10 @@ func NewAgent(name string, client Client, registry *Registry, opts ...AgentOptio
 	return a
 }
 
+// maxHistoryBytes caps the estimated memory used by conversation history.
+// When exceeded, the oldest entries (after the initial user message) are trimmed.
+const maxHistoryBytes = 4 * 1024 * 1024 // 4MB
+
 // Run executes the agent with the given message.
 func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 	start := time.Now()
@@ -101,6 +105,7 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 	}
 
 	history := make([]*Content, 0)
+	historyBytes := 0
 	turns := 0
 
 	callHistory := make(map[string]int)
@@ -111,7 +116,9 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	history = append(history, NewTextContent("user", message))
+	userMsg := NewTextContent("user", message)
+	history = append(history, userMsg)
+	historyBytes += estimateContentSize(userMsg)
 
 	for turns < a.config.MaxTurns {
 		turns++
@@ -124,6 +131,7 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 
 		modelContent := buildModelContent(resp)
 		history = append(history, modelContent)
+		historyBytes += estimateContentSize(modelContent)
 
 		if len(resp.FunctionCalls) == 0 {
 			return &AgentResult{
@@ -147,7 +155,9 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 					"LOOP DETECTED: Tool '%s' called %d times with same arguments. Try a different approach.",
 					fc.Name, count,
 				)
-				history = append(history, NewTextContent("user", intervention))
+				interventionContent := NewTextContent("user", intervention)
+				history = append(history, interventionContent)
+				historyBytes += estimateContentSize(interventionContent)
 				callHistoryMu.Lock()
 				callHistory[key] = 0
 				callHistoryMu.Unlock()
@@ -196,7 +206,12 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 		for j, result := range results {
 			funcParts[j] = Part{FunctionResponse: result}
 		}
-		history = append(history, &Content{Role: "user", Parts: funcParts})
+		funcContent := &Content{Role: "user", Parts: funcParts}
+		history = append(history, funcContent)
+		historyBytes += estimateContentSize(funcContent)
+
+		// Trim oldest history entries if memory limit exceeded.
+		history, historyBytes = trimHistory(history, historyBytes)
 
 		stream, err = a.client.SendFunctionResponse(ctx, history, results)
 		if err != nil {
@@ -204,12 +219,13 @@ func (a *Agent) Run(ctx context.Context, message string) (*AgentResult, error) {
 		}
 	}
 
+	maxTurnsErr := fmt.Errorf("agent reached maximum turn limit (%d)", a.config.MaxTurns)
 	return &AgentResult{
 		Text:     "Max turns reached",
 		Turns:    turns,
 		Duration: time.Since(start),
-		Error:    fmt.Errorf("agent reached maximum turn limit (%d)", a.config.MaxTurns),
-	}, nil
+		Error:    maxTurnsErr,
+	}, maxTurnsErr
 }
 
 // collectWithStreaming processes chunks in real-time, calling OnText per chunk.
@@ -265,6 +281,33 @@ func buildModelContent(resp *Response) *Content {
 		parts = append(parts, Part{Text: " "})
 	}
 	return &Content{Role: "model", Parts: parts}
+}
+
+// estimateContentSize returns a rough byte estimate for a Content entry.
+func estimateContentSize(c *Content) int {
+	size := len(c.Role)
+	for _, p := range c.Parts {
+		size += len(p.Text)
+		if p.FunctionCall != nil {
+			size += len(p.FunctionCall.Name) + len(fmt.Sprintf("%v", p.FunctionCall.Args))
+		}
+		if p.FunctionResponse != nil {
+			size += len(p.FunctionResponse.Name) + len(fmt.Sprintf("%v", p.FunctionResponse.Response))
+		}
+	}
+	return size
+}
+
+// trimHistory removes the oldest entries (preserving the first user message)
+// until total size is under maxHistoryBytes.
+func trimHistory(history []*Content, historyBytes int) ([]*Content, int) {
+	for historyBytes > maxHistoryBytes && len(history) > 2 {
+		// Remove the second entry (index 1), keeping the initial user message at index 0.
+		removed := estimateContentSize(history[1])
+		history = append(history[:1], history[2:]...)
+		historyBytes -= removed
+	}
+	return history, historyBytes
 }
 
 // GenerateID generates a short random hex ID.

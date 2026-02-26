@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -41,11 +42,6 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	sess, ok := h.sessions.GetOwned(id, clientID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
-		return
-	}
-
-	if sess.GetStatus() == session.StatusRunning {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "session already running"})
 		return
 	}
 
@@ -122,9 +118,8 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		timeoutSecs = 300
 	}
 
-	// Create context before agent so callbacks can use it
+	// Create context for agent lifecycle.
 	ctx, cancel := context.WithCancel(context.Background())
-	sess.SetCancel(cancel)
 
 	// Create agent with SSE callbacks
 	a := agent.NewAgent(sess.AgentDef.Name, client, registry,
@@ -149,11 +144,23 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}),
 	)
 
-	// Atomically transition to running — prevents double-start TOCTOU
-	if !sess.TryStart() {
+	// Atomically transition to running and enforce global maxConcurrent.
+	if err := h.sessions.StartOwned(sess.ID, clientID, cancel); err != nil {
 		cancel()
 		client.Close()
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "session already running"})
+		var runningErr *session.ErrSessionRunning
+		var limitErr *session.ErrMaxConcurrentReached
+		var notStartableErr *session.ErrSessionNotStartable
+		switch {
+		case errors.As(err, &runningErr):
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "session already running"})
+		case errors.As(err, &notStartableErr):
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		case errors.As(err, &limitErr):
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		}
 		return
 	}
 

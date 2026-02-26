@@ -24,7 +24,9 @@ services:
       - /tmp/agent-runner:size=256M
     read_only: true
     deploy:
-      replicas: 2
+      # Session state is in-memory; run a single replica unless you add sticky routing
+      # and an external shared session store.
+      replicas: 1
       restart_policy:
         condition: on-failure
         delay: 5s

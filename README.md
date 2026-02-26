@@ -265,7 +265,6 @@ Creates a new agent session. The session is in `created` state until a message i
 |--------|--------|
 | 400 | Invalid request body, invalid session_id format, invalid work_dir, invalid callback URL |
 | 409 | Session ID already exists |
-| 429 | Maximum concurrent sessions reached |
 
 ### Get Session
 
@@ -347,6 +346,7 @@ Starts the agent loop with the given message. Returns immediately with `202 Acce
 | 400 | Invalid request body or empty message |
 | 404 | Session not found or not owned by client |
 | 409 | Session is already running |
+| 429 | Maximum concurrent running sessions reached |
 
 ### Stream Events
 
@@ -354,7 +354,7 @@ Starts the agent loop with the given message. Returns immediately with `202 Acce
 GET /v1/sessions/{id}/stream
 ```
 
-Opens a Server-Sent Events (SSE) connection. Events are streamed in real-time as the agent executes. This endpoint has no timeout — the connection stays open until the agent finishes or the client disconnects.
+Opens a Server-Sent Events (SSE) connection. Events are streamed in real-time as the agent executes. This endpoint has no timeout — the connection stays open until the agent finishes (then the server closes it) or the client disconnects.
 
 See [SSE Streaming](#sse-streaming) for event format details.
 
@@ -492,6 +492,7 @@ Content-Type: application/json
 X-Session-ID: abc123
 X-Signature: sha256=<hex_digest>
 X-Timestamp: 1709000000
+X-Nonce: 4f9a4f1f6d4d7a8f87b5a5c8c2f12a10
 ```
 
 ```json
@@ -592,25 +593,27 @@ All `/v1/*` endpoints are authenticated via HMAC-SHA256 signatures. The `/health
 
 ### Signing Requests
 
-Every request must include two headers:
+Every request must include three headers:
 
 | Header | Value |
 |--------|-------|
 | `X-Signature` | `sha256=<hex_hmac_digest>` |
 | `X-Timestamp` | Unix timestamp (seconds) |
+| `X-Nonce` | Unique random string per request |
 
 The signature is computed as:
 
 ```
-payload = "{timestamp}.{request_body}"
+payload = "{timestamp}.{nonce}.{request_body}"
 signature = "sha256=" + hex(HMAC-SHA256(payload, secret))
 ```
 
 For GET/DELETE requests with no body, use an empty string as the request body.
 
-### Timestamp Freshness
+### Replay Protection
 
-Timestamps must be within **±2 minutes** of the server's clock. This prevents replay attacks.
+- Timestamps must be within **±2 minutes** of the server's clock
+- `X-Nonce` must be unique for each request within the freshness window
 
 ### PHP Example
 
@@ -618,12 +621,14 @@ Timestamps must be within **±2 minutes** of the server's clock. This prevents r
 function signRequest(string $secret, string $body): array
 {
     $timestamp = (string) time();
-    $payload = "{$timestamp}.{$body}";
+    $nonce = bin2hex(random_bytes(16));
+    $payload = "{$timestamp}.{$nonce}.{$body}";
     $signature = 'sha256=' . hash_hmac('sha256', $payload, $secret);
 
     return [
         'X-Signature' => $signature,
         'X-Timestamp' => $timestamp,
+        'X-Nonce' => $nonce,
     ];
 }
 ```
@@ -635,12 +640,14 @@ const crypto = require('crypto');
 
 function signRequest(secret, body) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const payload = `${timestamp}.${body}`;
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const payload = `${timestamp}.${nonce}.${body}`;
   const signature = 'sha256=' + crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
   return {
     'X-Signature': signature,
     'X-Timestamp': timestamp,
+    'X-Nonce': nonce,
   };
 }
 ```
@@ -759,6 +766,10 @@ server:
   host: "0.0.0.0"              # Listen address
   port: 8090                    # Listen port (1–65535)
   max_body_bytes: 10485760      # Max request body size (10MB)
+  read_header_timeout_sec: 5    # Protect against slowloris headers
+  read_timeout_sec: 30          # Max time to read full request
+  write_timeout_sec: 65         # Max time to write non-stream responses
+  idle_timeout_sec: 120         # Keep-alive idle timeout
   tls:
     cert_file: ""               # TLS certificate path (both or neither)
     key_file: ""                # TLS private key path
@@ -803,6 +814,10 @@ Every config value can be overridden via environment variables with the `AGENT_R
 | `AGENT_RUNNER_SERVER_HOST` | `server.host` | `0.0.0.0` |
 | `AGENT_RUNNER_SERVER_PORT` | `server.port` | `8090` |
 | `AGENT_RUNNER_SERVER_MAX_BODY_BYTES` | `server.max_body_bytes` | `10485760` |
+| `AGENT_RUNNER_SERVER_READ_HEADER_TIMEOUT_SEC` | `server.read_header_timeout_sec` | `5` |
+| `AGENT_RUNNER_SERVER_READ_TIMEOUT_SEC` | `server.read_timeout_sec` | `30` |
+| `AGENT_RUNNER_SERVER_WRITE_TIMEOUT_SEC` | `server.write_timeout_sec` | `65` |
+| `AGENT_RUNNER_SERVER_IDLE_TIMEOUT_SEC` | `server.idle_timeout_sec` | `120` |
 | `AGENT_RUNNER_TLS_CERT_FILE` | `server.tls.cert_file` | `/etc/ssl/cert.pem` |
 | `AGENT_RUNNER_TLS_KEY_FILE` | `server.tls.key_file` | `/etc/ssl/key.pem` |
 | `AGENT_RUNNER_AUTH_HMAC_SECRET` | `auth.hmac_secret` | `my-secret` |
@@ -842,6 +857,7 @@ On startup, the config is validated:
 - `server.port` must be 1–65535
 - `defaults.timeout_secs` must be positive
 - `callback.timeout_sec` must not be negative
+- `server.read_header_timeout_sec`, `server.read_timeout_sec`, `server.write_timeout_sec`, `server.idle_timeout_sec` must not be negative
 - `sessions.max_concurrent` must not be negative (0 = unlimited)
 - `sessions.ttl_minutes` must be positive
 - TLS: both `cert_file` and `key_file` must be set (or neither), and both files must exist
@@ -878,11 +894,13 @@ docker stack deploy -c docker-stack.yml agent-runner
 ```
 
 The `docker-stack.yml` includes:
-- 2 replicas with rolling updates (start-first, one at a time)
+- 1 replica (sessions are in-memory)
 - Automatic rollback on failure
 - Resource limits and reservations
 - Health checks
 - Overlay network
+
+For multi-replica deployments, you must add sticky routing and an external shared session store; otherwise `messages/get/stream` requests can hit different replicas and return `session not found`.
 
 ### Binary
 
@@ -910,7 +928,7 @@ kind: Deployment
 metadata:
   name: agent-runner
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: agent-runner
@@ -1008,7 +1026,8 @@ The shutdown timeout is `defaults.timeout_secs + 10 seconds` (minimum 10 seconds
 ### Authentication
 
 - HMAC-SHA256 on all API endpoints (except `/health`)
-- Timestamp freshness check (±2 minutes) prevents replay attacks
+- Timestamp freshness check (±2 minutes)
+- Per-request nonce (`X-Nonce`) blocks replay within the freshness window
 - Constant-time signature comparison prevents timing attacks
 
 ### Network

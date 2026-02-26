@@ -202,15 +202,21 @@ func (c *Client) doHTTP(ctx context.Context, body map[string]any) (*agent.Stream
 					return
 				}
 			}
+			if chunk.Done {
+				return
+			}
 		}
 		if err := scanner.Err(); err != nil {
-			chunks <- agent.ResponseChunk{Error: fmt.Errorf("stream read: %w", err)}
+			select {
+			case chunks <- agent.ResponseChunk{Error: fmt.Errorf("stream read: %w", err)}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		// Final done if not already sent
 		select {
 		case chunks <- agent.ResponseChunk{Done: true, FinishReason: agent.FinishReasonStop}:
-		default:
+		case <-ctx.Done():
 		}
 	}()
 

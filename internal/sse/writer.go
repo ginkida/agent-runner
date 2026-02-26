@@ -46,12 +46,14 @@ type ErrorData struct {
 
 // Stream writes SSE events from a channel to an http.ResponseWriter.
 // It blocks until the channel is closed or the client disconnects.
-func Stream(w http.ResponseWriter, r *http.Request, events <-chan Event) {
+func Stream(w http.ResponseWriter, r *http.Request, events <-chan Event, done <-chan struct{}) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
+	// Keep SSE connection exempt from server WriteTimeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -66,6 +68,8 @@ func Stream(w http.ResponseWriter, r *http.Request, events <-chan Event) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-done:
 			return
 		case <-heartbeat.C:
 			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {

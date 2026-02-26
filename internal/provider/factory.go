@@ -95,7 +95,11 @@ func buildCircuitBreaker(model string, cbCfg *config.CircuitBreakerConfig) *resi
 }
 
 func isOpenAIModel(model string) bool {
-	for _, p := range []string{"gpt-", "o1-", "o3-", "chatgpt-"} {
+	// Exact matches for bare reasoning model names.
+	if model == "o1" || model == "o3" {
+		return true
+	}
+	for _, p := range []string{"gpt-", "o1-", "o3-", "o4-", "chatgpt-"} {
 		if strings.HasPrefix(model, p) {
 			return true
 		}

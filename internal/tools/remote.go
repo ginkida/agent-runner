@@ -136,9 +136,10 @@ func (t *RemoteTool) doCallback(ctx context.Context, body []byte) (*agent.ToolRe
 	req.Header.Set("X-Session-ID", t.sessionID)
 
 	if t.hmacSecret != "" {
-		sig, ts := auth.SignRequest(t.hmacSecret, body)
+		sig, ts, nonce := auth.SignRequest(t.hmacSecret, body)
 		req.Header.Set("X-Signature", sig)
 		req.Header.Set("X-Timestamp", ts)
+		req.Header.Set("X-Nonce", nonce)
 	}
 
 	resp, err := t.httpClient.Do(req)
