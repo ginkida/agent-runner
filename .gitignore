@@ -28,3 +28,7 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# OpenAI Codex
+.codex/
+AGENTS.md

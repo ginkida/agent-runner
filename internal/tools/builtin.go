@@ -96,6 +96,13 @@ var blockedNetworkCmds = []string{
 	"rsync", "socat",
 }
 
+// blockedNetworkPattern matches blocked network commands anywhere in the
+// command string — including inside $(), backticks, and variable assignments.
+// Uses word boundaries to avoid false positives (e.g. "curling" won't match).
+var blockedNetworkPattern = regexp.MustCompile(
+	`(?i)\b(` + strings.Join(blockedNetworkCmds, "|") + `)\b`,
+)
+
 // sensitivePaths that should never be read or written by the agent.
 var sensitivePaths = []string{
 	"/.ssh/",
@@ -113,23 +120,10 @@ func isDangerousCommand(cmd string) (bool, string) {
 		return true, fmt.Sprintf("blocked dangerous pattern: %s", cmd[loc[0]:loc[1]])
 	}
 
-	// Check each command segment for blocked network commands.
-	// Split on pipe, semicolon, ampersand, and newline to get individual commands.
-	segments := splitCommandSegments(cmd)
-	for _, seg := range segments {
-		seg = strings.TrimSpace(seg)
-		if seg == "" {
-			continue
-		}
-		// Get the first word of the segment (the command name)
-		firstWord := strings.Fields(seg)[0]
-		// Strip any path prefix (e.g. /usr/bin/curl → curl)
-		firstWord = filepath.Base(firstWord)
-		for _, blocked := range blockedNetworkCmds {
-			if firstWord == blocked {
-				return true, fmt.Sprintf("blocked network command: %s", blocked)
-			}
-		}
+	// Check for blocked network commands anywhere in the command string,
+	// including inside $(), backticks, and variable assignments.
+	if loc := blockedNetworkPattern.FindStringIndex(cmd); loc != nil {
+		return true, fmt.Sprintf("blocked network command: %s", cmd[loc[0]:loc[1]])
 	}
 
 	// Check for sensitive paths in the command
@@ -140,40 +134,6 @@ func isDangerousCommand(cmd string) (bool, string) {
 	}
 
 	return false, ""
-}
-
-// splitCommandSegments splits a shell command string on |, ;, &&, || and newlines.
-func splitCommandSegments(cmd string) []string {
-	var segments []string
-	var current strings.Builder
-	i := 0
-	for i < len(cmd) {
-		ch := cmd[i]
-		switch ch {
-		case '|':
-			segments = append(segments, current.String())
-			current.Reset()
-			if i+1 < len(cmd) && cmd[i+1] == '|' {
-				i++ // skip ||
-			}
-		case ';', '\n':
-			segments = append(segments, current.String())
-			current.Reset()
-		case '&':
-			segments = append(segments, current.String())
-			current.Reset()
-			if i+1 < len(cmd) && cmd[i+1] == '&' {
-				i++ // skip &&
-			}
-		default:
-			current.WriteByte(ch)
-		}
-		i++
-	}
-	if current.Len() > 0 {
-		segments = append(segments, current.String())
-	}
-	return segments
 }
 
 // wrapWithLimits prepends resource limits to a bash command.
