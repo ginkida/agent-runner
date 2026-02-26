@@ -1,0 +1,42 @@
+services:
+  agent-runner:
+    build:
+      context: .
+      args:
+        VERSION: dev
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./config.yaml:/etc/agent-runner/config.yaml:ro
+      - workspace:/workspace
+    tmpfs:
+      - /tmp/agent-runner:size=256M,uid=1000,gid=1000
+    environment:
+      AGENT_RUNNER_AUTH_HMAC_SECRET: ${AGENT_RUNNER_HMAC_SECRET:-change-me}
+      AGENT_RUNNER_PROVIDERS_OPENAI_KEY: ${OPENAI_API_KEY:-}
+      AGENT_RUNNER_PROVIDERS_GEMINI_KEY: ${GEMINI_API_KEY:-}
+      AGENT_RUNNER_PROVIDERS_ANTHROPIC_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENT_RUNNER_DEFAULTS_MODEL: ${AGENT_RUNNER_MODEL:-gpt-4o-mini}
+      AGENT_RUNNER_CALLBACK_BASE_URL: ${CALLBACK_BASE_URL:-http://host.docker.internal:8000/api/agent-runner}
+      TZ: UTC
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  workspace:

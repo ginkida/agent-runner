@@ -1,0 +1,81 @@
+services:
+  agent-runner:
+    image: ghcr.io/ginkida/agent-runner:latest
+    ports:
+      - "8090:8090"
+    configs:
+      - source: agent_runner_config
+        target: /etc/agent-runner/config.yaml
+    secrets:
+      - hmac_secret
+      - openai_key
+      - gemini_key
+      - anthropic_key
+    environment:
+      AGENT_RUNNER_AUTH_HMAC_SECRET_FILE: /run/secrets/hmac_secret
+      AGENT_RUNNER_PROVIDERS_OPENAI_KEY_FILE: /run/secrets/openai_key
+      AGENT_RUNNER_PROVIDERS_GEMINI_KEY_FILE: /run/secrets/gemini_key
+      AGENT_RUNNER_PROVIDERS_ANTHROPIC_KEY_FILE: /run/secrets/anthropic_key
+      AGENT_RUNNER_CALLBACK_BASE_URL: ${CALLBACK_BASE_URL:-http://app:8000/api/agent-runner}
+      TZ: UTC
+    volumes:
+      - workspace:/workspace
+    tmpfs:
+      - /tmp/agent-runner:size=256M
+    read_only: true
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: start-first
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - agent-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+configs:
+  agent_runner_config:
+    file: ./config.yaml
+
+secrets:
+  hmac_secret:
+    external: true
+  openai_key:
+    external: true
+  gemini_key:
+    external: true
+  anthropic_key:
+    external: true
+
+volumes:
+  workspace:
+
+networks:
+  agent-net:
+    driver: overlay

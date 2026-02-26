@@ -1,0 +1,32 @@
+server:
+  host: "0.0.0.0"
+  port: 8090
+
+auth:
+  # HMAC secret shared with your Laravel application
+  # Also configurable via AGENT_RUNNER_AUTH_HMAC_SECRET env var
+  hmac_secret: "your-secret-here"
+
+providers:
+  # API keys for LLM providers (at least one required)
+  # Also configurable via AGENT_RUNNER_PROVIDERS_OPENAI_KEY, etc.
+  openai_key: ""
+  gemini_key: ""
+  anthropic_key: ""
+
+defaults:
+  # Default model when agent definition doesn't specify one
+  # Model prefix determines provider: gpt-*/o1-*/o3-* -> OpenAI, gemini-* -> Gemini, claude-* -> Anthropic
+  model: "gpt-4o-mini"
+  max_turns: 30
+  max_tokens: 4096
+  timeout_secs: 300
+
+sessions:
+  max_concurrent: 50
+  ttl_minutes: 30
+
+callback:
+  # Base URL for remote tool callbacks to your Laravel app
+  base_url: "http://localhost:8000/api/agent-runner"
+  timeout_sec: 30

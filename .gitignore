@@ -1,0 +1,30 @@
+# Build output
+dist/
+*.exe
+/agent-runner
+
+# Config with secrets (use config.example.yaml as template)
+config.yaml
+
+# Environment
+.env
+.env.*
+
+# Temp files
+tmp/
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local settings
+.claude/settings.local.json
