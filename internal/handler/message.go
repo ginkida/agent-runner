@@ -140,6 +140,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 				Tool:    name,
 				Success: tr.Success,
 				Content: tr.Content,
+				Error:   tr.Error,
 			}})
 		}),
 	)

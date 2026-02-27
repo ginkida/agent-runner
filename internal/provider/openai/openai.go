@@ -394,7 +394,7 @@ func convertHistory(history []*agent.Content, newMessage, sys string) []map[stri
 	return msgs
 }
 
-func convertHistoryWithResults(history []*agent.Content, results []*agent.FunctionResponse, sys string) []map[string]any {
+func convertHistoryWithResults(history []*agent.Content, _ []*agent.FunctionResponse, sys string) []map[string]any {
 	msgs := make([]map[string]any, 0)
 	if sys != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": sys})
@@ -402,13 +402,10 @@ func convertHistoryWithResults(history []*agent.Content, results []*agent.Functi
 	for _, c := range history {
 		msgs = append(msgs, contentToMsgs(c)...)
 	}
-	for _, r := range results {
-		msgs = append(msgs, map[string]any{
-			"role":         "tool",
-			"tool_call_id": nonEmpty(r.ID, r.Name),
-			"content":      resultContent(r),
-		})
-	}
+	// Results are already included in history (added by the agent loop
+	// before calling SendFunctionResponse), so we don't append them again.
+	// Duplicating them would create tool messages without matching
+	// preceding assistant tool_calls, which OpenAI rejects.
 	return msgs
 }
 

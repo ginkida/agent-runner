@@ -308,7 +308,7 @@ func toAnthropicMsgs(history []*agent.Content, newMsg string) []map[string]any {
 	return msgs
 }
 
-func toAnthropicMsgsWithResults(history []*agent.Content, results []*agent.FunctionResponse) []map[string]any {
+func toAnthropicMsgsWithResults(history []*agent.Content, _ []*agent.FunctionResponse) []map[string]any {
 	msgs := make([]map[string]any, 0)
 	for _, c := range history {
 		if c.Role == "user" {
@@ -317,15 +317,10 @@ func toAnthropicMsgsWithResults(history []*agent.Content, results []*agent.Funct
 			msgs = append(msgs, buildAssistantMsg(c.Parts))
 		}
 	}
-	rc := make([]map[string]any, 0)
-	for _, r := range results {
-		id := r.ID
-		if id == "" {
-			id = r.Name
-		}
-		rc = append(rc, map[string]any{"type": "tool_result", "tool_use_id": id, "content": frContent(r)})
-	}
-	msgs = append(msgs, map[string]any{"role": "user", "content": rc})
+	// Results are already included in history (added by the agent loop
+	// before calling SendFunctionResponse). buildUserMsg converts
+	// FunctionResponse parts to tool_result blocks, so we don't
+	// append them again.
 	return msgs
 }
 

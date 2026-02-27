@@ -74,18 +74,10 @@ func (c *Client) SendMessageWithHistory(ctx context.Context, history []*agent.Co
 }
 
 func (c *Client) SendFunctionResponse(ctx context.Context, history []*agent.Content, results []*agent.FunctionResponse) (*agent.StreamResponse, error) {
+	// Results are already included in history (added by the agent loop
+	// before calling SendFunctionResponse). toGeminiContentsRaw converts
+	// FunctionResponse parts, so we don't append them again.
 	contents := toGeminiContentsRaw(history)
-	// Append function response parts
-	parts := make([]map[string]any, 0, len(results))
-	for _, r := range results {
-		parts = append(parts, map[string]any{
-			"functionResponse": map[string]any{
-				"name":     r.Name,
-				"response": r.Response,
-			},
-		})
-	}
-	contents = append(contents, map[string]any{"role": "user", "parts": parts})
 	return c.doStream(ctx, contents)
 }
 

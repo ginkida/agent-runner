@@ -29,6 +29,7 @@ type ToolResultData struct {
 	Tool    string `json:"tool"`
 	Success bool   `json:"success"`
 	Content string `json:"content"`
+	Error   string `json:"error,omitempty"`
 }
 
 // DoneData is the payload for done events.
