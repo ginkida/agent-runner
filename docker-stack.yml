@@ -3,9 +3,6 @@ services:
     image: ghcr.io/ginkida/agent-runner:latest
     ports:
       - "8090:8090"
-    configs:
-      - source: agent_runner_config
-        target: /etc/agent-runner/config.yaml
     secrets:
       - hmac_secret
       - openai_key
@@ -17,11 +14,10 @@ services:
       AGENT_RUNNER_PROVIDERS_GEMINI_KEY_FILE: /run/secrets/gemini_key
       AGENT_RUNNER_PROVIDERS_ANTHROPIC_KEY_FILE: /run/secrets/anthropic_key
       AGENT_RUNNER_CALLBACK_BASE_URL: ${CALLBACK_BASE_URL:-http://app:8000/api/agent-runner}
+      AGENT_RUNNER_SECURITY_ALLOW_PRIVATE_NETWORKS: "true"
       TZ: UTC
     volumes:
       - workspace:/workspace
-    tmpfs:
-      - /tmp/agent-runner:size=256M
     read_only: true
     deploy:
       # Session state is in-memory; run a single replica unless you add sticky routing
@@ -60,10 +56,6 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-
-configs:
-  agent_runner_config:
-    file: ./config.yaml
 
 secrets:
   hmac_secret:

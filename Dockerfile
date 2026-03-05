@@ -39,4 +39,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["wget", "--spider", "-q", "http://localhost:8090/health"]
 
 ENTRYPOINT ["tini", "--", "agent-runner"]
-CMD ["--config", "/etc/agent-runner/config.yaml"]
+CMD []

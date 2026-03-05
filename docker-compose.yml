@@ -7,10 +7,9 @@ services:
     ports:
       - "8090:8090"
     volumes:
-      - ./config.yaml:/etc/agent-runner/config.yaml:ro
       - workspace:/workspace
-    tmpfs:
-      - /tmp/agent-runner:size=256M,uid=1000,gid=1000
+      # Optional: mount a config file (env vars work without it)
+      # - ./config.yaml:/etc/agent-runner/config.yaml:ro
     environment:
       AGENT_RUNNER_AUTH_HMAC_SECRET: ${AGENT_RUNNER_HMAC_SECRET:-change-me}
       AGENT_RUNNER_PROVIDERS_OPENAI_KEY: ${OPENAI_API_KEY:-}
